@@ -1,0 +1,10 @@
+{
+  "node": "n8n-nodes-flurryport-locker",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": ["Data & Storage"],
+  "resources": {
+    "credentialDocumentation": [{ "url": "https://flurryport.io/docs/locker" }],
+    "primaryDocumentation": [{ "url": "https://flurryport.io/docs/locker" }]
+  }
+}

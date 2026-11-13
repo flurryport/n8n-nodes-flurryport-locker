@@ -1,0 +1,54 @@
+{
+  "name": "n8n-nodes-flurryport-locker",
+  "version": "0.1.1",
+  "description": "Archive every run of a workflow, signed and kept, with a receipt you can check without FlurryPORT.",
+  "license": "MIT",
+  "keywords": [
+    "n8n-community-node-package",
+    "archive",
+    "audit",
+    "receipt",
+    "flurryport"
+  ],
+  "homepage": "https://flurryport.io/docs/locker",
+  "bugs": {
+    "url": "https://github.com/flurryport/n8n-nodes-flurryport-locker/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flurryport/n8n-nodes-flurryport-locker.git"
+  },
+  "author": {
+    "name": "Spill Coffee LLC",
+    "email": "me@spill.coffee"
+  },
+  "main": "index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.cjs",
+    "test": "npm run build && node --test tests/sizing.test.mjs tests/archive-run.test.mjs tests/errors.test.mjs",
+    "prepublishOnly": "npm run test"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/FlurryPortLockerApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/FlurryPortLocker/FlurryPortLocker.node.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "n8n-workflow": "1.82.0",
+    "typescript": "5.7.2",
+    "@types/node": "22.10.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
