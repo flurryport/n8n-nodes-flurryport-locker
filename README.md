@@ -1,74 +1,155 @@
 # n8n-nodes-flurryport-locker
 
-Archive every run of a workflow, signed and kept, with a receipt you can check without
-FlurryPORT.
+An n8n community node for [FlurryPORT Locker](https://flurryport.io/docs/locker/n8n). It sends
+the result of a workflow to Locker and gets back a signed receipt that anyone can check, with or
+without FlurryPORT.
 
-Runs are kept for as long as you subscribe and handed back as a bundle with the verifier if you
-leave. Every run gets a signed receipt and a verify link that works without us.
+Use it when someone outside your n8n has to be able to trust what a workflow did: a client you
+run automations for, a customer who asks what happened to their order, an auditor.
 
-Help: flurryport.io/docs/locker. Support: the link in the app.
+Receipts are kept while you subscribe, run data for fourteen months, and the export checks
+without us, so keep it as long as your rules require.
+
+Help: [flurryport.io/docs/locker/n8n](https://flurryport.io/docs/locker/n8n).
 
 ## What it does
 
-Drop the **FlurryPORT Locker** node at the end of a workflow. On each execution it builds one run
-document (what went in, what came out, the status, the binaries by hash), posts it to Locker with
-your install key, and writes the receipt onto every item for the next node:
+Put the **FlurryPORT Locker** node where the result of the workflow is known, usually last. It
+sends one document to Locker (what you mapped into **Inputs** and **Outputs**, the status you
+chose, your labels) and writes the receipt onto every item for the next node:
 
 ```json
 { "locker": { "archived": true, "receiptId": "2BsK…", "verifyUrl": "https://flurryport.io/receipts/2BsK…", "chainPosition": 12 } }
 ```
 
-It never breaks the workflow unless you ask: when the archive cannot be written the items pass
+The receipt page opens without signing in. Send the link to whoever needs the proof.
+
+It never breaks the workflow unless you ask: when Locker cannot be reached the items pass
 through with `locker.archived: false` and a reason. **Fail Workflow On Error** in the options
 turns that into a stop.
 
-## Install (self-hosted n8n)
+## What it is not
 
-Settings, Community nodes, Install, `n8n-nodes-flurryport-locker`. n8n Cloud does not list
-unverified nodes; this node is for self-hosted instances.
+This node is an ordinary app node for an outside service. It sends the data you map into it,
+the status and labels you set, the workflow's name and ID, the execution ID (so a retry returns
+the same receipt) and how the run was started. For binary files on the items it sends the
+name, type, size and a SHA-256 fingerprint, never the file.
+
+- It does not read n8n's execution history, its logs or its settings.
+- It is not a log stream and not an audit log of n8n itself. It records the outcome you choose
+  to record, in a place the people you answer to can check for themselves.
+- It does not list or compare n8n's executions. A step cannot prove that a run it never saw
+  was missing.
+
+## Install
+
+In n8n: **Settings**, **Community nodes**, **Install**, and enter
+`n8n-nodes-flurryport-locker`.
 
 ## Credential
 
-**FlurryPORT Locker API**: the install key from the install's key page in FlurryPORT (it starts
-with `fp_`, shown once), and the API base URL (leave it). The credential test reads your installs.
+**FlurryPORT Locker API** takes two values:
+
+- **Install key**: it starts with `fp_`. Create a free account at
+  [flurryport.io](https://flurryport.io), open **Locker**, choose the **Any HTTP** connector,
+  name the install (the name of your n8n server works), choose **Create install**, and copy
+  the key. You can show it again later from the install.
+- **API base URL**: leave it as it is.
+
+The credential test reads your installs. Locker starts free with 250 runs or 14 days, whichever
+comes first.
 
 ## Operations
 
-- **Archive** (`Archive run in locker`): inputs (JSON, optional), outputs (JSON, default: the
-  items reaching the node), run status, labels, and options: hash binary files (default on), max
-  section kilobytes (default 256; inputs and outputs are each cut at whole items past it, with the
-  count and the SHA-256 of the full thing kept), fail workflow on error (default off).
-- **Get Receipt** (`Get receipt for run`): one archived run and its receipt by id.
+- **Archive** (`Archive run in locker`): **Inputs** (JSON, optional), **Outputs** (JSON, default:
+  the items reaching the node), **Run Status**, **Labels**, and options: **Hash Binary Files**
+  (default on), **Max Section Kilobytes** (default 256), **Fail Workflow On Error** (default off).
+- **Get Receipt** (`Get receipt for run`): one run and its receipt, by receipt ID.
+
+A retry of the same execution returns the first receipt and records nothing new.
+
+## Example workflow
+
+A webhook receives an order, the workflow does its work, and the last node records the result.
+Copy this into n8n (**Import from clipboard**), then choose your credential on the Locker node.
+
+```json
+{
+  "name": "Order received, with a receipt",
+  "nodes": [
+    {
+      "parameters": { "httpMethod": "POST", "path": "order", "options": {} },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "orderId", "value": "={{ $json.body.orderId }}", "type": "string" },
+            { "id": "2", "name": "accepted", "value": true, "type": "boolean" }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Accept order",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "resource": "run",
+        "operation": "archive",
+        "inputs": "={{ $('Webhook').item.json.body }}",
+        "outputs": "={{ $input.all() }}",
+        "runStatus": "success",
+        "labels": { "label": [{ "name": "orderId", "value": "={{ $json.orderId }}" }] }
+      },
+      "name": "Locker",
+      "type": "n8n-nodes-flurryport-locker.flurryPortLocker",
+      "typeVersion": 1,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Accept order", "type": "main", "index": 0 }]] },
+    "Accept order": { "main": [[{ "node": "Locker", "type": "main", "index": 0 }]] }
+  }
+}
+```
+
+After a run, the Locker node's output carries `locker.verifyUrl`. Open it to see the receipt.
 
 ## Sizes
 
-Each of inputs and outputs is measured in canonical JSON; a section over the cap keeps the first
+Inputs and outputs are each measured as canonical JSON. A section over the cap keeps the first
 whole items that fit, then `truncated: true`, the counts, and the fingerprint of the full
-serialisation, so a holder of the original can show it matches later. Binary files are never
-uploaded: each is recorded by name, type, size and SHA-256 (files over 25 MB are listed without a
-hash). The whole document is capped at 1 MB; past it, and on a 413, the node sends a metadata-only
-stub (hashes kept) so the run still gets a receipt and the chain has no hole.
-
-## Known limit
-
-A step that never fails cannot prove that a run it never saw was missing. The Locker reader
-lists runs per workflow; reconciliation against n8n's execution list is not part of this node.
+section, so a holder of the original can show it matches later. Binary files are never uploaded:
+each is recorded by name, type, size and SHA-256 (files over 25 MB are listed without a hash).
+The whole document is capped at 1 MB. Past that the node sends the fingerprints without the
+items, so the run still gets a receipt.
 
 ## Development
 
 ```bash
-npm install
-npm test        # builds with tsc, copies the icons and the codex file into dist, then node --test
+npm install --ignore-scripts
+npm run lint    # n8n's linter, through @n8n/node-cli
+npm test        # builds with n8n-node build, then node --test
+npm run dev     # runs n8n with the node loaded
 ```
+
+`--ignore-scripts` skips building a native part of the `n8n-workflow` peer dependency, which
+the node does not use. n8n's own installer skips it too.
 
 Tested against n8n 2.47.7: the node and its credential load, the credential test passes, an
 archive returns a receipt that verifies, and a failed archive passes the items through.
 
-Installing by hand outside n8n: a plain `npm install` tries to build a native part of the
-`n8n-workflow` peer dependency. n8n's own installer skips build scripts; do the same with
-`npm install n8n-nodes-flurryport-locker --ignore-scripts`.
+## Releases
 
-## Source
+Releases are built and published to npm from this repository by a GitHub Action
+(`.github/workflows/publish.yml`), on a version tag, with an npm provenance statement.
 
-This repository is a read-only mirror of the node's source, published as a snapshot with each
-release. Releases are on npm as `n8n-nodes-flurryport-locker`. MIT licensed.
+MIT licensed.

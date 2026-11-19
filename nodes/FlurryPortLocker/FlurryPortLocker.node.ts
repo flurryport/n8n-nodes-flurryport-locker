@@ -7,12 +7,11 @@ import type {
   IDataObject,
   JsonObject,
 } from 'n8n-workflow';
-import { NodeApiError, NodeConnectionType, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionType, NodeOperationError, sleep } from 'n8n-workflow';
 import { createHash } from 'node:crypto';
+import { version as packageVersion } from '../../package.json';
 import { describeFailure, retryAfterSeconds, type ProblemDetails } from './errors';
 import { buildRunDocument, jcs, MAX_DOCUMENT_BYTES, sizeSection, stubOf, utf8Bytes, type BinarySummary } from './sizing';
-
-const { version: packageVersion } = require('../../package.json') as { version: string };
 
 const MAX_BINARY_HASH_BYTES = 25 * 1024 * 1024;
 
@@ -43,7 +42,7 @@ export class FlurryPortLocker implements INodeType {
     group: ['transform'],
     version: 1,
     subtitle: '={{$parameter["operation"]}}',
-    description: 'Archive workflow runs with a signed receipt',
+    description: 'Send a run to FlurryPORT Locker and get a signed receipt back',
     defaults: { name: 'Locker' },
     inputs: [NodeConnectionType.Main],
     outputs: [NodeConnectionType.Main],
@@ -76,7 +75,7 @@ export class FlurryPortLocker implements INodeType {
         type: 'json',
         default: '',
         displayOptions: { show: { operation: ['archive'] } },
-        description: 'What the run started from, e.g. {{ $(\'Webhook\').all() }}. Leave empty to omit.',
+        description: 'What the run started from, such as the body a webhook received. Map only what should be kept. Leave empty to omit.',
       },
       {
         displayName: 'Outputs',
@@ -150,7 +149,7 @@ export class FlurryPortLocker implements INodeType {
       const receiptId = this.getNodeParameter('receiptId', 0) as string;
       const outcome = await request.call(this, { method: 'GET', url: `${baseUrl}/api/v1/locker/runs/${encodeURIComponent(receiptId)}` });
       if (outcome.status !== 200) throw new NodeApiError(this.getNode(), (outcome.body ?? {}) as JsonObject, { message: describeFailure(outcome.status, outcome.body as ProblemDetails).reason });
-      return [[{ json: outcome.body as IDataObject }]];
+      return [[{ json: outcome.body as IDataObject, pairedItem: { item: 0 } }]];
     }
 
     const options = { hashBinaryFiles: true, maxSectionKilobytes: 256, failWorkflowOnError: false, ...(this.getNodeParameter('options', 0, {}) as Partial<ArchiveOptions>) } as ArchiveOptions;
@@ -165,7 +164,10 @@ export class FlurryPortLocker implements INodeType {
     const inputs = sizeSection(unwrapItems(parseJsonParameter(this.getNodeParameter('inputs', 0, ''))), maxSectionBytes);
     const outputs = sizeSection(unwrapItems(parseJsonParameter(this.getNodeParameter('outputs', 0, ''))) ?? items.map((i) => i.json), maxSectionBytes);
     const binaries = options.hashBinaryFiles ? await summariseBinaries.call(this, items) : [];
-    const finishedAt = new Date().toISOString();
+    // The execution id is the idempotency key. A finish time stamped here would differ on a
+    // retry of the same execution, and the same key with a different document is refused. So
+    // the time is sent only when there is no execution id to repeat (#535).
+    const finishedAt = executionId ? undefined : new Date().toISOString();
 
     let document = buildRunDocument({
       clientVersion: packageVersion,
@@ -188,11 +190,13 @@ export class FlurryPortLocker implements INodeType {
     let outcome = await request.call(this, { method: 'POST', url: `${baseUrl}/api/v1/locker/runs`, body: document, headers });
     if (outcome.status === 413) outcome = await request.call(this, { method: 'POST', url: `${baseUrl}/api/v1/locker/runs`, body: stubOf(document), headers });
     if (outcome.status === 429) {
-      await new Promise((r) => setTimeout(r, retryAfterSeconds(outcome.headers['retry-after']) * 1000));
+      await sleep(retryAfterSeconds(outcome.headers['retry-after']) * 1000);
       outcome = await request.call(this, { method: 'POST', url: `${baseUrl}/api/v1/locker/runs`, body: document, headers });
     }
 
-    const out = items.length ? items.map((item) => ({ json: { ...item.json }, binary: item.binary, pairedItem: item.pairedItem })) : [{ json: {} as IDataObject }];
+    const out: INodeExecutionData[] = items.length
+      ? items.map((item, index) => ({ json: { ...item.json }, binary: item.binary, pairedItem: { item: index } }))
+      : [{ json: {} as IDataObject, pairedItem: { item: 0 } }];
     if (outcome.status === 201 || outcome.status === 200) {
       const r = outcome.body as IDataObject;
       const locker: IDataObject = {

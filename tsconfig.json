@@ -21,6 +21,7 @@
   "include": [
     "credentials/**/*.ts",
     "nodes/**/*.ts",
+    "nodes/**/*.json",
     "package.json"
   ],
   "exclude": [

@@ -1,4 +1,4 @@
-import type { IAuthenticateGeneric, ICredentialTestRequest, ICredentialType, INodeProperties } from 'n8n-workflow';
+import type { IAuthenticateGeneric, Icon, ICredentialTestRequest, ICredentialType, INodeProperties } from 'n8n-workflow';
 
 /**
  * The install key (an fp_ token scoped to one Locker install) and the API base. Issued from the
@@ -8,7 +8,11 @@ import type { IAuthenticateGeneric, ICredentialTestRequest, ICredentialType, INo
 export class FlurryPortLockerApi implements ICredentialType {
   name = 'flurryPortLockerApi';
   displayName = 'FlurryPORT Locker API';
-  documentationUrl = 'https://flurryport.io/docs/locker';
+  icon: Icon = {
+    light: 'file:../nodes/FlurryPortLocker/flurryport-locker.svg',
+    dark: 'file:../nodes/FlurryPortLocker/flurryport-locker.dark.svg',
+  };
+  documentationUrl = 'https://flurryport.io/docs/locker/n8n';
   properties: INodeProperties[] = [
     {
       displayName: 'Install key',

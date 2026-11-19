@@ -60,6 +60,23 @@ test('archive posts one document for the execution and writes the receipt onto e
   assert.equal(items[0].json.locker, undefined, 'the incoming items are never changed');
 });
 
+test('a retry of the same execution sends the same document, so the first receipt comes back (#535)', async () => {
+  const node = new FlurryPortLocker();
+  const items = [{ json: { a: 1 } }];
+  const first = context({ items, responses: [{ status: 201, body: receipt }] });
+  const second = context({ items, responses: [{ status: 200, body: receipt }] });
+
+  await node.execute.call(first, []);
+  await new Promise((r) => setTimeout(r, 5));
+  const [out] = await node.execute.call(second, []);
+
+  assert.equal(first.calls[0].options.body.run.finishedAt, undefined, 'no finish time when the execution id is the key');
+  assert.deepEqual(second.calls[0].options.body, first.calls[0].options.body);
+  assert.equal(second.calls[0].options.headers['Idempotency-Key'], first.calls[0].options.headers['Idempotency-Key']);
+  assert.equal(out[0].json.locker.duplicate, true);
+  assert.deepEqual(out[0].pairedItem, { item: 0 }, 'each item is paired with the item it came from');
+});
+
 test('the allowance on the item is in the same casing as the rest of locker', async () => {
   const node = new FlurryPortLocker();
   const ctx = context({ items: [{ json: { a: 1 } }], responses: [{ status: 201, body: { ...receipt, Allowance: { State: 'free', PlanName: 'Free', RunsRemaining: 249, DaysRemaining: 14, Locked: false, PlanUrl: 'https://flurryport.io/billing/locker' } } }] });
