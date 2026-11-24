@@ -65,6 +65,7 @@ export class FlurryPortLocker implements INodeType {
         displayOptions: { show: { resource: ['run'] } },
         options: [
           { name: 'Archive', value: 'archive', action: 'Archive run in locker', description: 'Keep this run with a signed receipt' },
+          { name: 'Find', value: 'find', action: 'Find runs by label', description: 'Find archived runs by a label, such as an order number' },
           { name: 'Get Receipt', value: 'getReceipt', action: 'Get receipt for run', description: 'Read one archived run and its receipt' },
         ],
         default: 'archive',
@@ -136,6 +137,46 @@ export class FlurryPortLocker implements INodeType {
         required: true,
         displayOptions: { show: { operation: ['getReceipt'] } },
       },
+      {
+        displayName: 'Label Name',
+        name: 'labelName',
+        type: 'string',
+        default: '',
+        required: true,
+        placeholder: 'orderId',
+        displayOptions: { show: { operation: ['find'] } },
+        description: 'The name of a label set on Archive. The match is exact and case-sensitive.',
+      },
+      {
+        displayName: 'Label Value',
+        name: 'labelValue',
+        type: 'string',
+        default: '',
+        required: true,
+        displayOptions: { show: { operation: ['find'] } },
+        description: 'The value to look for. The match is exact, so 1001 does not find 10010.',
+      },
+      {
+        displayName: 'Limit',
+        name: 'limit',
+        type: 'number',
+        typeOptions: { minValue: 1, maxValue: 100 },
+        default: 50,
+        displayOptions: { show: { operation: ['find'] } },
+        description: 'Max number of results to return',
+      },
+      {
+        displayName: 'Filters',
+        name: 'filters',
+        type: 'collection',
+        placeholder: 'Add filter',
+        default: {},
+        displayOptions: { show: { operation: ['find'] } },
+        options: [
+          { displayName: 'Since', name: 'since', type: 'dateTime', default: '', description: 'Only runs archived at or after this time' },
+          { displayName: 'Until', name: 'until', type: 'dateTime', default: '', description: 'Only runs archived at or before this time' },
+        ],
+      },
     ],
   };
 
@@ -152,6 +193,46 @@ export class FlurryPortLocker implements INodeType {
       return [[{ json: outcome.body as IDataObject, pairedItem: { item: 0 } }]];
     }
 
+    if (operation === 'find') {
+      // Receipts only: a match names the run and its receipt. Get Receipt reads the rest.
+      const filters = this.getNodeParameter('filters', 0, {}) as { since?: string; until?: string };
+      const query = new URLSearchParams({
+        labelName: String(this.getNodeParameter('labelName', 0) ?? ''),
+        labelValue: String(this.getNodeParameter('labelValue', 0) ?? ''),
+        limit: String(this.getNodeParameter('limit', 0, 50)),
+      });
+      if (filters.since) query.set('since', new Date(filters.since).toISOString());
+      if (filters.until) query.set('until', new Date(filters.until).toISOString());
+      const outcome = await request.call(this, { method: 'GET', url: `${baseUrl}/api/v1/locker/runs?${query.toString()}` });
+      if (outcome.status !== 200) throw new NodeApiError(this.getNode(), (outcome.body ?? {}) as JsonObject, { message: describeFailure(outcome.status, outcome.body as ProblemDetails).reason });
+      const found = outcome.body as { Matches?: IDataObject[]; Truncated?: boolean; LimitReached?: boolean; ScannedThrough?: string };
+      const matches = found.Matches ?? [];
+      // One item per run, newest first. No match is no item, as with any search in n8n, with
+      // one exception: a lookup that was cut short must say so, or an empty answer would read
+      // as "there is none" when the truth is "not found among the newest runs".
+      if (matches.length === 0 && found.Truncated) {
+        return [[{
+          json: { found: false, truncated: true, scannedThrough: found.ScannedThrough, hint: 'More runs than one lookup scans. Set Since and Until to narrow the window.' },
+          pairedItem: { item: 0 },
+        }]];
+      }
+      return [matches.map((m) => {
+        const json: IDataObject = {
+          found: true,
+          receiptId: m.ReceiptId,
+          verifyUrl: m.VerifyUrl,
+          chainPosition: m.ChainIndex,
+          archivedAt: m.CapturedAt,
+          workflowName: m.WorkflowName,
+          runId: m.RunId,
+          status: m.Status,
+        };
+        if (found.Truncated) json.truncated = true;
+        if (found.LimitReached) json.limitReached = true;
+        return { json, pairedItem: { item: 0 } };
+      })];
+    }
+
     const options = { hashBinaryFiles: true, maxSectionKilobytes: 256, failWorkflowOnError: false, ...(this.getNodeParameter('options', 0, {}) as Partial<ArchiveOptions>) } as ArchiveOptions;
     const maxSectionBytes = Math.max(1, options.maxSectionKilobytes) * 1024;
     const status = this.getNodeParameter('runStatus', 0, 'success') as string;
@@ -166,7 +247,7 @@ export class FlurryPortLocker implements INodeType {
     const binaries = options.hashBinaryFiles ? await summariseBinaries.call(this, items) : [];
     // The execution id is the idempotency key. A finish time stamped here would differ on a
     // retry of the same execution, and the same key with a different document is refused. So
-    // the time is sent only when there is no execution id to repeat (#535).
+    // the time is sent only when there is no execution id to repeat.
     const finishedAt = executionId ? undefined : new Date().toISOString();
 
     let document = buildRunDocument({
@@ -185,7 +266,10 @@ export class FlurryPortLocker implements INodeType {
     if (utf8Bytes(jcs(document)) > MAX_DOCUMENT_BYTES) document = stubOf(document);
 
     const headers: Record<string, string> = { 'X-FlurryPort-Node-Version': packageVersion };
-    if (executionId) headers['Idempotency-Key'] = String(executionId).slice(0, 64);
+    if (executionId) {
+      const instanceId = typeof this.getInstanceId === 'function' ? this.getInstanceId() : '';
+      headers['Idempotency-Key'] = runKey(instanceId, workflow.id ? String(workflow.id) : '', String(executionId), document);
+    }
 
     let outcome = await request.call(this, { method: 'POST', url: `${baseUrl}/api/v1/locker/runs`, body: document, headers });
     if (outcome.status === 413) outcome = await request.call(this, { method: 'POST', url: `${baseUrl}/api/v1/locker/runs`, body: stubOf(document), headers });
@@ -222,6 +306,24 @@ export class FlurryPortLocker implements INodeType {
     for (const o of out) o.json.locker = failure as unknown as IDataObject;
     return [out];
   }
+}
+
+/**
+ * The key that makes a repeat of one run come back as its first receipt and nothing else.
+ * It names the n8n instance, the workflow, the execution and what was recorded.
+ *
+ * Until 0.1.3 the key was n8n's execution id alone. That id is a counter per instance, so a
+ * restored instance, a rebuilt one, or two instances sharing one install key reached the same
+ * number with different data, and Locker refused the second as a conflict: the run was not
+ * archived. With the document in the key, a different run can never collide with an earlier
+ * one, while a retry of the same execution sends the same document (no finish time is stamped
+ * when there is an execution id) and so the same key, and still gets the first receipt.
+ *
+ * A SHA-256 in hex is 64 characters, which is the most Locker accepts for a key.
+ */
+function runKey(instanceId: string, workflowId: string, executionId: string, document: unknown): string {
+  const recorded = createHash('sha256').update(jcs(document)).digest('hex');
+  return createHash('sha256').update([instanceId, workflowId, executionId, recorded].join('\n')).digest('hex');
 }
 
 /**

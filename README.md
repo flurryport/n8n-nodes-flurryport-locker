@@ -31,9 +31,11 @@ turns that into a stop.
 ## What it is not
 
 This node is an ordinary app node for an outside service. It sends the data you map into it,
-the status and labels you set, the workflow's name and ID, the execution ID (so a retry returns
-the same receipt) and how the run was started. For binary files on the items it sends the
-name, type, size and a SHA-256 fingerprint, never the file.
+the status and labels you set, the workflow's name and ID, the execution ID and how the run was
+started. For binary files on the items it sends the name, type, size and a SHA-256 fingerprint,
+never the file. With each run it also sends one key, a SHA-256 fingerprint made from your n8n
+instance ID, the workflow ID, the execution ID and the data being recorded. The instance ID
+itself is not sent. The key is how Locker knows a repeat of the same run from a new one.
 
 - It does not read n8n's execution history, its logs or its settings.
 - It is not a log stream and not an audit log of n8n itself. It records the outcome you choose
@@ -43,7 +45,11 @@ name, type, size and a SHA-256 fingerprint, never the file.
 
 ## Install
 
-In n8n: **Settings**, **Community nodes**, **Install**, and enter
+The node is verified by n8n and works on n8n Cloud and on self-hosted n8n. Open the nodes
+panel, search for **FlurryPORT Locker**, and install it. The owner of the instance may need to
+turn on verified community nodes first.
+
+On a self-hosted n8n you can also use **Settings**, **Community nodes**, **Install**, and enter
 `n8n-nodes-flurryport-locker`.
 
 ## Credential
@@ -64,9 +70,21 @@ comes first.
 - **Archive** (`Archive run in locker`): **Inputs** (JSON, optional), **Outputs** (JSON, default:
   the items reaching the node), **Run Status**, **Labels**, and options: **Hash Binary Files**
   (default on), **Max Section Kilobytes** (default 256), **Fail Workflow On Error** (default off).
+- **Find** (`Find runs by label`): the runs that carry one label, such as an order number, newest
+  first. **Label Name** and **Label Value** are matched exactly and with case, so `1001` does not
+  find `10010`. **Limit** (default 50, at most 100), and the filters **Since** and **Until**.
+  Each item is a receipt: `receiptId`, `verifyUrl`, `chainPosition`, `archivedAt`,
+  `workflowName`, `runId`, `status`. It never carries what went in or came out; use
+  **Get Receipt** with the `receiptId` for that. No match emits no item.
 - **Get Receipt** (`Get receipt for run`): one run and its receipt, by receipt ID.
 
-A retry of the same execution returns the first receipt and records nothing new.
+Find opens the newest 2,000 runs of the install on each call. If the install holds more and
+nothing was found, the node says so with `found: false` and `truncated: true`; set **Since** and
+**Until** to look further back. Find needs Locker's free allowance or a plan, like reading a run.
+
+A retry of the same execution returns the first receipt and records nothing new. The same
+execution number on another n8n instance, in another workflow, or after a restore with other
+data, is a different run and is archived as one (from 0.1.4).
 
 ## Example workflow
 

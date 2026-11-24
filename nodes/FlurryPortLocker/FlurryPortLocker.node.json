@@ -3,6 +3,26 @@
   "nodeVersion": "1.0",
   "codexVersion": "1.0",
   "categories": ["Data & Storage"],
+  "alias": [
+    "Locker",
+    "FlurryPORT",
+    "archive",
+    "audit",
+    "audit trail",
+    "audit log",
+    "receipt",
+    "signed receipt",
+    "proof",
+    "evidence",
+    "tamper evident",
+    "verify",
+    "verification",
+    "record",
+    "signature",
+    "fingerprint",
+    "hash",
+    "provenance"
+  ],
   "resources": {
     "credentialDocumentation": [{ "url": "https://flurryport.io/docs/locker/n8n" }],
     "primaryDocumentation": [{ "url": "https://flurryport.io/docs/locker/n8n" }]

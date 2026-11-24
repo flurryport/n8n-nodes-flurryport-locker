@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-flurryport-locker",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Send the result of a workflow to FlurryPORT Locker and get back a signed receipt that anyone can check.",
   "license": "MIT",
   "keywords": [

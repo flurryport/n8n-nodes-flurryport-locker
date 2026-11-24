@@ -4,17 +4,18 @@ import assert from 'node:assert/strict';
 const { FlurryPortLocker } = await import('../dist/nodes/FlurryPortLocker/FlurryPortLocker.node.js');
 
 /** A fake IExecuteFunctions: parameters, credentials, the items, and the HTTP helper answering by script. */
-function context({ items = [], params = {}, responses = [], binaries = {} } = {}) {
+function context({ items = [], params = {}, responses = [], binaries = {}, instanceId = 'instance_a', workflowId = 'wf_9', executionId = 'exec_42' } = {}) {
   const calls = [];
   let n = 0;
-  const defaults = { resource: 'run', operation: 'archive', inputs: '', outputs: '', runStatus: 'success', labels: {}, options: {} };
+  const defaults = { resource: 'run', operation: 'archive', inputs: '', outputs: '', runStatus: 'success', labels: {}, options: {}, labelName: '', labelValue: '', limit: 50, filters: {} };
   const ctx = {
     calls,
     getInputData: () => items,
     getNodeParameter: (name, _i, fallback) => (name in params ? params[name] : name in defaults ? defaults[name] : fallback),
     getCredentials: async () => ({ installKey: 'fp_test', baseUrl: 'https://api.test' }),
-    getWorkflow: () => ({ id: 'wf_9', name: 'Order to invoice' }),
-    getExecutionId: () => 'exec_42',
+    getWorkflow: () => ({ id: workflowId, name: 'Order to invoice' }),
+    getExecutionId: () => executionId,
+    getInstanceId: () => instanceId,
     getMode: () => 'trigger',
     getNode: () => ({ name: 'Locker', type: 'flurryPortLocker', typeVersion: 1 }),
     continueOnFail: () => false,
@@ -45,7 +46,7 @@ test('archive posts one document for the execution and writes the receipt onto e
   assert.equal(credential, 'flurryPortLockerApi');
   assert.equal(options.method, 'POST');
   assert.equal(options.url, 'https://api.test/api/v1/locker/runs');
-  assert.equal(options.headers['Idempotency-Key'], 'exec_42');
+  assert.match(options.headers['Idempotency-Key'], /^[0-9a-f]{64}$/, 'the key is a fingerprint of the instance, the workflow, the execution and the document');
   assert.equal(options.body.schema, 'locker.run/1');
   assert.equal(options.body.platform, 'n8n');
   assert.deepEqual(options.body.workflow, { id: 'wf_9', name: 'Order to invoice' });
@@ -60,7 +61,7 @@ test('archive posts one document for the execution and writes the receipt onto e
   assert.equal(items[0].json.locker, undefined, 'the incoming items are never changed');
 });
 
-test('a retry of the same execution sends the same document, so the first receipt comes back (#535)', async () => {
+test('a retry of the same execution sends the same document, so the first receipt comes back', async () => {
   const node = new FlurryPortLocker();
   const items = [{ json: { a: 1 } }];
   const first = context({ items, responses: [{ status: 201, body: receipt }] });
@@ -193,4 +194,106 @@ test('get receipt reads one run by id', async () => {
   assert.equal(ctx.calls[0].options.method, 'GET');
   assert.equal(ctx.calls[0].options.url, 'https://api.test/api/v1/locker/runs/2BsKb3W3pL6qkbnuH7yJGg');
   assert.equal(out[0].json.Kind, 'run');
+});
+
+// ---- The run identity is more than n8n's execution number ----
+
+const keyOf = async (opts) => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ items: [{ json: { orderId: 1001 } }], responses: [{ status: 201, body: receipt }], ...opts });
+  await node.execute.call(ctx, []);
+  return ctx.calls[0].options.headers['Idempotency-Key'];
+};
+
+test('the same execution with the same data sends the same key, so a retry is still a duplicate', async () => {
+  assert.equal(await keyOf({}), await keyOf({}));
+});
+
+test('the same execution number on another n8n instance is a different run', async () => {
+  assert.notEqual(await keyOf({ instanceId: 'instance_a' }), await keyOf({ instanceId: 'instance_b' }));
+});
+
+test('the same execution number in another workflow is a different run', async () => {
+  assert.notEqual(await keyOf({ workflowId: 'wf_9' }), await keyOf({ workflowId: 'wf_10' }));
+});
+
+test('a restored instance that reaches the same execution number with other data is a different run', async () => {
+  const before = await keyOf({ items: [{ json: { orderId: 1001 } }] });
+  const afterRestore = await keyOf({ items: [{ json: { orderId: 2002 } }] });
+  assert.notEqual(before, afterRestore, 'the old key was the execution number alone, and Locker refused the second run');
+});
+
+test('an older n8n with no instance id still sends a key', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ items: [{ json: {} }], responses: [{ status: 201, body: receipt }] });
+  delete ctx.getInstanceId;
+  await node.execute.call(ctx, []);
+  assert.match(ctx.calls[0].options.headers['Idempotency-Key'], /^[0-9a-f]{64}$/);
+});
+
+// ---- Find runs by a label ----
+
+const match = (n) => ({ ReceiptId: 'rcpt_' + n, VerifyUrl: 'https://flurryport.io/receipts/rcpt_' + n, ChainIndex: n, CapturedAt: '2026-11-23T18:02:13Z', WorkflowName: 'Refund approval', RunId: 'exec_' + n, Status: 'success' });
+
+test('find runs asks by label with the install key and returns one item per run, receipts only', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({
+    params: { operation: 'find', labelName: 'orderId', labelValue: '1001', limit: 5, filters: { since: '2026-11-01T00:00:00Z' } },
+    responses: [{ status: 200, body: { Matches: [match(7), match(3)], Scanned: 12, Truncated: false, LimitReached: false, ScannedThrough: '2026-11-02T00:00:00Z' } }],
+  });
+
+  const [out] = await node.execute.call(ctx, []);
+
+  const { credential, options } = ctx.calls[0];
+  assert.equal(credential, 'flurryPortLockerApi');
+  assert.equal(options.method, 'GET');
+  const url = new URL(options.url);
+  assert.equal(url.origin + url.pathname, 'https://api.test/api/v1/locker/runs');
+  assert.equal(url.searchParams.get('labelName'), 'orderId');
+  assert.equal(url.searchParams.get('labelValue'), '1001');
+  assert.equal(url.searchParams.get('limit'), '5');
+  assert.equal(url.searchParams.get('since'), '2026-11-01T00:00:00.000Z');
+  assert.equal(url.searchParams.get('until'), null);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out[0].json, { found: true, receiptId: 'rcpt_7', verifyUrl: 'https://flurryport.io/receipts/rcpt_7', chainPosition: 7, archivedAt: '2026-11-23T18:02:13Z', workflowName: 'Refund approval', runId: 'exec_7', status: 'success' });
+  assert.equal(out[1].json.receiptId, 'rcpt_3');
+});
+
+test('a label value with spaces and symbols is sent intact', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ params: { operation: 'find', labelName: 'client', labelValue: 'Acme & Sons / West' }, responses: [{ status: 200, body: { Matches: [] } }] });
+  await node.execute.call(ctx, []);
+  assert.equal(new URL(ctx.calls[0].options.url).searchParams.get('labelValue'), 'Acme & Sons / West');
+});
+
+test('find runs with no match emits no item', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ params: { operation: 'find', labelName: 'orderId', labelValue: '9999' }, responses: [{ status: 200, body: { Matches: [], Scanned: 4, Truncated: false, LimitReached: false } }] });
+  const [out] = await node.execute.call(ctx, []);
+  assert.equal(out.length, 0);
+});
+
+test('find runs that was cut short and found nothing says so instead of answering empty', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ params: { operation: 'find', labelName: 'orderId', labelValue: '9999' }, responses: [{ status: 200, body: { Matches: [], Scanned: 2000, Truncated: true, LimitReached: false, ScannedThrough: '2026-10-01T00:00:00Z' } }] });
+  const [out] = await node.execute.call(ctx, []);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].json.found, false);
+  assert.equal(out[0].json.truncated, true);
+  assert.equal(out[0].json.scannedThrough, '2026-10-01T00:00:00Z');
+  assert.match(out[0].json.hint, /Since and Until/);
+});
+
+test('find runs marks the items when the limit stopped the scan', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ params: { operation: 'find', labelName: 'client', labelValue: 'acme', limit: 1 }, responses: [{ status: 200, body: { Matches: [match(9)], Scanned: 1, Truncated: false, LimitReached: true } }] });
+  const [out] = await node.execute.call(ctx, []);
+  assert.equal(out[0].json.limitReached, true);
+  assert.equal(out[0].json.truncated, undefined);
+});
+
+test('find runs that Locker refuses throws with the reason', async () => {
+  const node = new FlurryPortLocker();
+  const ctx = context({ params: { operation: 'find', labelName: 'orderId', labelValue: '1001' }, responses: [{ status: 409, body: { title: 'locker_locked', detail: 'The free allowance is spent.' } }] });
+  await assert.rejects(node.execute.call(ctx, []));
 });
